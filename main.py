@@ -6,13 +6,24 @@ import json
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import aiohttp
+
+# ============================================================
+# 🔧 НАСТРОЙКИ РОЛЕЙ (ИЗМЕНЯЙТЕ ЗДЕСЬ)
+# ============================================================
+ADMIN_ROLES = ["🥶owner🤗, 🥳|Co-owner|🥰"]           
+MODERATOR_ROLES = ["[STAFF]"]         
+KICK_ROLES = ["[STAFF]"]  
+MUTE_ROLES = ["[STAFF]"]  
+BAN_ROLES = ["[STAFF]"]                         
+LOG_CHANNEL = "logs"                                           
+MUTE_ROLE_NAME = "Muted"                                       
+# ============================================================
 
 # Загрузка переменных окружения
 load_dotenv()
-
-# Загрузка конфигурации
-with open('config.json', 'r', encoding='utf-8') as f:
-    config = json.load(f)
 
 # Настройки бота
 intents = discord.Intents.default()
@@ -24,6 +35,102 @@ bot = commands.Bot(command_prefix='/', intents=intents)
 
 # Словарь для хранения временных мутов
 muted_users = {}
+
+# ============================================================
+# 🖼️ ФУНКЦИЯ ДЛЯ СОЗДАНИЯ КАРТИНКИ С АВАТАРКОЙ БОТА
+# ============================================================
+
+async def create_bot_image(text, title, color="#4A90D9"):
+    """
+    Создает изображение с аватаркой бота на синем фоне
+    """
+    # Создаем фон
+    img = Image.new('RGB', (800, 400), color=color)
+    draw = ImageDraw.Draw(img)
+    
+    # Пытаемся загрузить аватарку бота
+    try:
+        if bot.user and bot.user.avatar:
+            avatar_url = bot.user.avatar.url
+            async with aiohttp.ClientSession() as session:
+                async with session.get(avatar_url) as resp:
+                    if resp.status == 200:
+                        avatar_data = await resp.read()
+                        avatar_img = Image.open(BytesIO(avatar_data))
+                        avatar_img = avatar_img.resize((150, 150))
+                        # Делаем круглую аватарку
+                        mask = Image.new('L', (150, 150), 0)
+                        mask_draw = ImageDraw.Draw(mask)
+                        mask_draw.ellipse((0, 0, 150, 150), fill=255)
+                        avatar_img.putalpha(mask)
+                        # Вставляем аватарку на фон
+                        img.paste(avatar_img, (50, 125), avatar_img)
+    except:
+        pass  # Если не удалось загрузить аватарку, пропускаем
+    
+    # Рисуем круглый фон для аватарки (если нет аватарки)
+    if not bot.user or not bot.user.avatar:
+        draw.ellipse((50, 125, 200, 275), fill="#2ECC71", outline="#FFFFFF", width=5)
+        draw.text((90, 185), "🐻", font=None, fill="white")
+    
+    # Добавляем текст
+    try:
+        # Пытаемся загрузить шрифт
+        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+        font_text = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+    except:
+        font_title = ImageFont.load_default()
+        font_text = ImageFont.load_default()
+    
+    # Название бота
+    bot_name = bot.user.name if bot.user else "NorthBears"
+    draw.text((250, 140), f"🐻 {bot_name}", fill="white", font=font_title)
+    
+    # Основной текст (название команды)
+    draw.text((250, 200), title, fill="#FFFFFF", font=font_text)
+    
+    # Дополнительный текст
+    draw.text((250, 250), text, fill="#E8E8E8", font=font_text)
+    
+    # Нижний колонтитул
+    draw.text((50, 360), "NorthBears Bot", fill="#FFFFFF", font=font_text)
+    draw.text((650, 360), datetime.now().strftime("%d.%m.%Y %H:%M"), fill="#FFFFFF", font=font_text)
+    
+    # Сохраняем в BytesIO
+    img_buffer = BytesIO()
+    img.save(img_buffer, format='PNG')
+    img_buffer.seek(0)
+    
+    return img_buffer
+
+async def send_with_image(interaction, title, description, color="#4A90D9", footer=None):
+    """Отправляет сообщение с картинкой"""
+    img_buffer = await create_bot_image(description, title, color)
+    file = discord.File(img_buffer, filename="northbears.png")
+    
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.blue()
+    )
+    embed.set_image(url="attachment://northbears.png")
+    embed.set_footer(text=footer or "NorthBears Bot 🐻")
+    embed.timestamp = datetime.now()
+    
+    await interaction.response.send_message(embed=embed, file=file)
+
+# ============================================================
+# ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ПРАВ
+# ============================================================
+
+def has_permission(interaction, required_roles):
+    """Проверяет наличие прав у пользователя"""
+    user_roles = [role.name for role in interaction.user.roles]
+    return any(role in user_roles for role in required_roles)
+
+# ============================================================
+# КЛАССЫ ДЛЯ КНОПОК
+# ============================================================
 
 class MuteView(discord.ui.View):
     def __init__(self, member, duration, reason, moderator):
@@ -41,40 +148,29 @@ class MuteView(discord.ui.View):
         
         await interaction.response.defer()
         
-        # Назначение роли "Muted"
-        mute_role = discord.utils.get(interaction.guild.roles, name=config['mute_role_name'])
+        mute_role = discord.utils.get(interaction.guild.roles, name=MUTE_ROLE_NAME)
         
         if not mute_role:
-            # Создание роли если её нет
             mute_role = await interaction.guild.create_role(
-                name=config['mute_role_name'],
+                name=MUTE_ROLE_NAME,
                 permissions=discord.Permissions(send_messages=False, add_reactions=False, speak=False)
             )
-            # Настройка переопределений прав для всех каналов
             for channel in interaction.guild.channels:
                 await channel.set_permissions(mute_role, send_messages=False, add_reactions=False, speak=False)
         
         await self.member.add_roles(mute_role, reason=f"Мут от {interaction.user.name}: {self.reason}")
         
-        # Сохранение информации о муте
         unmute_time = datetime.now() + self.duration
         muted_users[self.member.id] = unmute_time
         
-        embed = discord.Embed(
-            title="🔇 Пользователь замьючен",
-            description=f"Пользователь {self.member.mention} был замьючен!",
-            color=discord.Color.red()
+        # Отправляем с картинкой
+        await send_with_image(
+            interaction,
+            "🔇 Пользователь замьючен",
+            f"{self.member.mention} был замьючен!\n⏱️ Длительность: {str(self.duration)}\n👤 Модератор: {interaction.user.mention}\n📝 Причина: {self.reason}\n⏰ Размут в: {unmute_time.strftime('%d.%m.%Y %H:%M:%S')}"
         )
-        embed.add_field(name="👤 Модератор", value=interaction.user.mention, inline=True)
-        embed.add_field(name="⏱️ Длительность", value=str(self.duration), inline=True)
-        embed.add_field(name="📝 Причина", value=self.reason, inline=False)
-        embed.add_field(name="⏰ Размут в", value=unmute_time.strftime("%d.%m.%Y %H:%M:%S"), inline=False)
         
-        await interaction.followup.send(embed=embed)
-        
-        # Отправка в лог-канал
-        await send_log(interaction.guild, embed)
-        
+        await send_log(interaction.guild, f"🔇 {self.member} замьючен модератором {interaction.user}\nПричина: {self.reason}\nДлительность: {self.duration}")
         self.stop()
 
     @discord.ui.button(label="❌ Отмена", style=discord.ButtonStyle.danger)
@@ -82,7 +178,6 @@ class MuteView(discord.ui.View):
         if interaction.user != self.moderator:
             await interaction.response.send_message("❌ Вы не можете использовать эту кнопку!", ephemeral=True)
             return
-        
         await interaction.response.send_message("✅ Действие отменено!", ephemeral=True)
         self.stop()
 
@@ -105,20 +200,16 @@ class BanView(discord.ui.View):
         try:
             await self.member.ban(reason=f"{interaction.user.name}: {self.reason}", delete_message_days=self.delete_days)
             
-            embed = discord.Embed(
-                title="🔨 Пользователь забанен",
-                description=f"{self.member.mention} был забанен!",
-                color=discord.Color.red()
+            await send_with_image(
+                interaction,
+                "🔨 Пользователь забанен",
+                f"{self.member.mention} был забанен!\n👤 Модератор: {interaction.user.mention}\n📝 Причина: {self.reason}\n🗑️ Удалено сообщений за: {self.delete_days} дней"
             )
-            embed.add_field(name="👤 Модератор", value=interaction.user.mention, inline=True)
-            embed.add_field(name="📝 Причина", value=self.reason, inline=False)
-            embed.add_field(name="🗑️ Удалено сообщений за", value=f"{self.delete_days} дней", inline=False)
             
-            await interaction.followup.send(embed=embed)
-            await send_log(interaction.guild, embed)
+            await send_log(interaction.guild, f"🔨 {self.member} забанен модератором {interaction.user}\nПричина: {self.reason}")
             
         except discord.Forbidden:
-            await interaction.followup.send("❌ У меня недостаточно прав для бана этого пользователя!", ephemeral=True)
+            await interaction.response.send_message("❌ У меня недостаточно прав для бана этого пользователя!", ephemeral=True)
         
         self.stop()
 
@@ -127,35 +218,36 @@ class BanView(discord.ui.View):
         if interaction.user != self.moderator:
             await interaction.response.send_message("❌ Вы не можете использовать эту кнопку!", ephemeral=True)
             return
-        
         await interaction.response.send_message("✅ Бан отменен!", ephemeral=True)
         self.stop()
 
-async def send_log(guild, embed):
-    log_channel_name = config['log_channel']
-    log_channel = discord.utils.get(guild.channels, name=log_channel_name)
-    
+# ============================================================
+# ФУНКЦИЯ ДЛЯ ЛОГОВ
+# ============================================================
+
+async def send_log(guild, message):
+    log_channel = discord.utils.get(guild.channels, name=LOG_CHANNEL)
     if not log_channel:
-        # Создание канала если его нет
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True)
         }
-        log_channel = await guild.create_text_channel(log_channel_name, overwrites=overwrites)
+        log_channel = await guild.create_text_channel(LOG_CHANNEL, overwrites=overwrites)
     
+    embed = discord.Embed(
+        title="📋 Лог",
+        description=message,
+        color=discord.Color.blue(),
+        timestamp=datetime.now()
+    )
     await log_channel.send(embed=embed)
 
-def has_permission(interaction, role_list_key):
-    """Проверка наличия прав у пользователя"""
-    user_roles = [role.name for role in interaction.user.roles]
-    allowed_roles = config[role_list_key]
-    
-    return any(role in user_roles for role in allowed_roles)
+# ============================================================
+# ПАРСИНГ ДЛИТЕЛЬНОСТИ
+# ============================================================
 
 def parse_duration(duration_str):
-    """Парсинг строки длительности (1h30m45s)"""
     import re
-    
     total_seconds = 0
     pattern = re.compile(r'(\d+)([hms])')
     matches = pattern.findall(duration_str.lower())
@@ -174,6 +266,10 @@ def parse_duration(duration_str):
     
     return total_seconds
 
+# ============================================================
+# СОБЫТИЯ БОТА
+# ============================================================
+
 @bot.event
 async def on_ready():
     print(f'✅ Бот {bot.user.name} готов к работе!')
@@ -184,11 +280,9 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Ошибка синхронизации: {e}")
     
-    # Запуск проверки мутов
     bot.loop.create_task(check_mutes())
 
 async def check_mutes():
-    """Проверка и снятие мутов"""
     await bot.wait_until_ready()
     while not bot.is_closed():
         current_time = datetime.now()
@@ -202,24 +296,23 @@ async def check_mutes():
             for guild in bot.guilds:
                 member = guild.get_member(user_id)
                 if member:
-                    mute_role = discord.utils.get(guild.roles, name=config['mute_role_name'])
+                    mute_role = discord.utils.get(guild.roles, name=MUTE_ROLE_NAME)
                     if mute_role and mute_role in member.roles:
                         await member.remove_roles(mute_role, reason="Время мута истекло")
-                        embed = discord.Embed(
-                            title="🔊 Пользователь размьючен",
-                            description=f"{member.mention} был автоматически размьючен!",
-                            color=discord.Color.green()
-                        )
-                        await send_log(guild, embed)
+                        await send_log(guild, f"🔊 {member} автоматически размьючен (время истекло)")
             
             del muted_users[user_id]
         
-        await asyncio.sleep(60)  # Проверка каждую минуту
+        await asyncio.sleep(60)
+
+# ============================================================
+# КОМАНДЫ БОТА
+# ============================================================
 
 @bot.tree.command(name="kick", description="Выгнать пользователя с сервера")
 @app_commands.describe(member="Пользователь для кика", reason="Причина кика")
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
-    if not has_permission(interaction, 'kick_roles'):
+    if not has_permission(interaction, KICK_ROLES):
         await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
         return
     
@@ -230,16 +323,13 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
     try:
         await member.kick(reason=f"{interaction.user.name}: {reason}")
         
-        embed = discord.Embed(
-            title="👢 Пользователь кикнут",
-            description=f"{member.mention} был кикнут!",
-            color=discord.Color.orange()
+        await send_with_image(
+            interaction,
+            "👢 Пользователь кикнут",
+            f"{member.mention} был кикнут!\n👤 Модератор: {interaction.user.mention}\n📝 Причина: {reason}"
         )
-        embed.add_field(name="👤 Модератор", value=interaction.user.mention, inline=True)
-        embed.add_field(name="📝 Причина", value=reason, inline=False)
         
-        await interaction.response.send_message(embed=embed)
-        await send_log(interaction.guild, embed)
+        await send_log(interaction.guild, f"👢 {member} кикнут модератором {interaction.user}\nПричина: {reason}")
         
     except discord.Forbidden:
         await interaction.response.send_message("❌ У меня недостаточно прав для кика этого пользователя!", ephemeral=True)
@@ -251,7 +341,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
     reason="Причина мута"
 )
 async def mute(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = "Не указана"):
-    if not has_permission(interaction, 'mute_roles'):
+    if not has_permission(interaction, MUTE_ROLES):
         await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
         return
     
@@ -259,19 +349,16 @@ async def mute(interaction: discord.Interaction, member: discord.Member, duratio
         await interaction.response.send_message("❌ Вы не можете замьютить этого пользователя!", ephemeral=True)
         return
     
-    # Парсинг длительности
     try:
         total_seconds = parse_duration(duration)
         if total_seconds <= 0:
             await interaction.response.send_message("❌ Неверный формат длительности! Пример: 1h30m или 45s", ephemeral=True)
             return
-        
         duration_delta = timedelta(seconds=total_seconds)
     except:
         await interaction.response.send_message("❌ Неверный формат длительности! Пример: 1h30m или 45s", ephemeral=True)
         return
     
-    # Создание представления для подтверждения
     view = MuteView(member, duration_delta, reason, interaction.user)
     
     embed = discord.Embed(
@@ -287,7 +374,7 @@ async def mute(interaction: discord.Interaction, member: discord.Member, duratio
 @bot.tree.command(name="ban", description="Забанить пользователя")
 @app_commands.describe(member="Пользователь для бана", reason="Причина бана", delete_messages="Удалить сообщения (дни)")
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана", delete_messages: int = 0):
-    if not has_permission(interaction, 'ban_roles'):
+    if not has_permission(interaction, BAN_ROLES):
         await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
         return
     
@@ -310,11 +397,11 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 @bot.tree.command(name="unmute", description="Снять мут с пользователя")
 @app_commands.describe(member="Пользователь для размута", reason="Причина размута")
 async def unmute(interaction: discord.Interaction, member: discord.Member, reason: str = "Не указана"):
-    if not has_permission(interaction, 'mute_roles'):
+    if not has_permission(interaction, MUTE_ROLES):
         await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
         return
     
-    mute_role = discord.utils.get(interaction.guild.roles, name=config['mute_role_name'])
+    mute_role = discord.utils.get(interaction.guild.roles, name=MUTE_ROLE_NAME)
     
     if not mute_role or mute_role not in member.roles:
         await interaction.response.send_message("❌ Этот пользователь не замьючен!", ephemeral=True)
@@ -323,84 +410,72 @@ async def unmute(interaction: discord.Interaction, member: discord.Member, reaso
     try:
         await member.remove_roles(mute_role, reason=f"{interaction.user.name}: {reason}")
         
-        # Удаление из словаря мутов
         if member.id in muted_users:
             del muted_users[member.id]
         
-        embed = discord.Embed(
-            title="🔊 Пользователь размьючен",
-            description=f"{member.mention} был размьючен!",
-            color=discord.Color.green()
+        await send_with_image(
+            interaction,
+            "🔊 Пользователь размьючен",
+            f"{member.mention} был размьючен!\n👤 Модератор: {interaction.user.mention}\n📝 Причина: {reason}"
         )
-        embed.add_field(name="👤 Модератор", value=interaction.user.mention, inline=True)
-        embed.add_field(name="📝 Причина", value=reason, inline=False)
         
-        await interaction.response.send_message(embed=embed)
-        await send_log(interaction.guild, embed)
+        await send_log(interaction.guild, f"🔊 {member} размьючен модератором {interaction.user}\nПричина: {reason}")
         
     except discord.Forbidden:
         await interaction.response.send_message("❌ У меня недостаточно прав для размута этого пользователя!", ephemeral=True)
 
 @bot.tree.command(name="config", description="Показать текущую конфигурацию")
 async def show_config(interaction: discord.Interaction):
-    if not has_permission(interaction, 'admin_roles'):
+    if not has_permission(interaction, ADMIN_ROLES):
         await interaction.response.send_message("❌ У вас нет прав на использование этой команды!", ephemeral=True)
         return
     
-    embed = discord.Embed(
-        title="⚙️ Конфигурация бота",
-        color=discord.Color.blue()
+    config_text = f"""
+**📋 Текущая конфигурация:**
+
+**Администраторы:** {', '.join(ADMIN_ROLES)}
+**Модераторы:** {', '.join(MODERATOR_ROLES)}
+**Кто может кикать:** {', '.join(KICK_ROLES)}
+**Кто может мутить:** {', '.join(MUTE_ROLES)}
+**Кто может банить:** {', '.join(BAN_ROLES)}
+**Канал логов:** #{LOG_CHANNEL}
+**Роль мута:** {MUTE_ROLE_NAME}
+"""
+    
+    await send_with_image(
+        interaction,
+        "⚙️ Конфигурация бота",
+        config_text
     )
-    
-    for key, value in config.items():
-        if isinstance(value, list):
-            value = ", ".join(value)
-        embed.add_field(name=key, value=value, inline=False)
-    
-    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="help", description="Показать список команд")
 async def help_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📚 Команды бота _NorthBears_",
-        description="Список доступных команд",
-        color=discord.Color.blue()
-    )
-    
-    embed.add_field(
-        name="👢 /kick",
-        value="Выгнать пользователя\nИспользование: `/kick @пользователь причина`",
-        inline=False
-    )
-    embed.add_field(
-        name="🔇 /mute",
-        value="Замьютить пользователя\nИспользование: `/mute @пользователь 1h30m причина`",
-        inline=False
-    )
-    embed.add_field(
-        name="🔊 /unmute",
-        value="Снять мут\nИспользование: `/unmute @пользователь причина`",
-        inline=False
-    )
-    embed.add_field(
-        name="🔨 /ban",
-        value="Забанить пользователя\nИспользование: `/ban @пользователь причина дни`",
-        inline=False
-    )
-    embed.add_field(
-        name="⚙️ /config",
-        value="Показать конфигурацию\nТолько для администраторов",
-        inline=False
-    )
-    
-    embed.set_footer(text="Настройка ролей в config.json")
-    
-    await interaction.response.send_message(embed=embed)
+    help_text = """
+**📚 Команды бота:**
 
-# Запуск бота
+👢 `/kick @пользователь причина` - Выгнать пользователя
+🔇 `/mute @пользователь 1h30m причина` - Замьютить
+🔊 `/unmute @пользователь причина` - Снять мут
+🔨 `/ban @пользователь причина дни` - Забанить
+⚙️ `/config` - Показать конфигурацию (только админы)
+📖 `/help` - Эта помощь
+
+**Форматы длительности:** 1h, 30m, 45s, 1h30m45s
+"""
+    
+    await send_with_image(
+        interaction,
+        "📚 Помощь по командам",
+        help_text
+    )
+
+# ============================================================
+# ЗАПУСК БОТА
+# ============================================================
+
 if __name__ == "__main__":
     token = os.getenv('DISCORD_TOKEN')
     if not token:
-        print("❌ Токен не найден! Проверьте файл .env")
+        print("❌ Токен не найден! Проверьте переменную окружения DISCORD_TOKEN")
     else:
         bot.run(token)
