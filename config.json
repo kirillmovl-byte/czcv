@@ -1,0 +1,9 @@
+{
+    "admin_roles": ["🥶owner🤗, 🥳|Co-owner|🥰"],
+    "moderator_roles": ["[STAFF]"],
+    "kick_roles": ["[STAFF]"],
+    "mute_roles": ["[STAFF]"],
+    "ban_roles": ["[STAFF]"],
+    "log_channel": "logs",
+    "mute_role_name": "Muted"
+}
